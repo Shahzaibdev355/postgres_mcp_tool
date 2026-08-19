@@ -61,3 +61,28 @@ def list_schemas() -> str:
 
     except Exception as e:
         return f"Failed to list schemas: {e}"
+
+
+@mcp.tool()
+def list_tables() -> str:
+    """List all tables in the connected PostgreSQL database"""
+    try:
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT table_schema, table_name
+            FROM information_schema.tables
+            WHERE table_type = 'BASE TABLE'
+              AND table_schema NOT IN ('pg_catalog', 'information_schema')
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return "No tables found."
+
+        return "\n".join(f"{schema}.{table}" for schema, table in rows)
+
+    except Exception as e:
+        return f"Failed to list tables: {e}"
