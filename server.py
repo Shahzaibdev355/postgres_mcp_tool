@@ -69,12 +69,14 @@ def list_tables() -> str:
     try:
         conn = get_postgres_connection()
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT table_schema, table_name
             FROM information_schema.tables
             WHERE table_type = 'BASE TABLE'
               AND table_schema NOT IN ('pg_catalog', 'information_schema')
-        """)
+        """
+        )
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -86,3 +88,113 @@ def list_tables() -> str:
 
     except Exception as e:
         return f"Failed to list tables: {e}"
+
+
+@mcp.tool()
+def describe_table(schema: str, table: str) -> str:
+    """describe table in the connected PostgreSQL database"""
+    try:
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                column_name,
+                data_type,
+                is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = %s
+            AND table_name = %s
+            ORDER BY ordinal_position;
+        """,
+            (schema, table),
+        )
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return "No table schema found."
+
+        return "\n".join(
+            f"{column} | {data_type} | {nullable}"
+            for column, data_type, nullable in rows
+        )
+
+    except Exception as e:
+        return f"Failed to list table schema: {e}"
+
+
+@mcp.tool()
+def execute_select(query: str) -> str:
+    """Execute a read-only SELECT query on the PostgreSQL database."""
+    try:
+        # Basic safety check
+        if not query.strip().lower().startswith("select"):
+            return "Only SELECT queries are allowed."
+
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+
+        cur.execute(query)
+        rows = cur.fetchall()
+
+        # Get column names
+        columns = [desc[0] for desc in cur.description]
+
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return "Query returned no results."
+
+        # Format output
+        result = [" | ".join(columns)]
+
+        for row in rows:
+            result.append(" | ".join(str(value) for value in row))
+
+        return "\n".join(result)
+
+    except Exception as e:
+        return f"Query failed: {e}"
+
+
+@mcp.tool()
+def insert_row(schema: str, table: str, name: str) -> str:
+    """Insert a name into a table."""
+
+    try:
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+
+        # check schema + table exist
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = %s AND table_name = %s
+        """,
+            (schema, table),
+        )
+
+        if cur.fetchone() is None:
+            cur.close()
+            conn.close()
+            return f"Schema or table '{schema}.{table}' does not exist"
+
+        query = f"""
+            INSERT INTO {schema}.{table} (name)
+            VALUES (%s)
+        """
+
+        cur.execute(query, (name,))
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return f"'{name}' inserted successfully into {schema}.{table}"
+
+    except Exception as e:
+        return f"failed to insert row: {e}"
