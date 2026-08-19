@@ -1,0 +1,14 @@
+langchain-groq
+mcp-use
+praisonaiagents
+langchain-mcp-adapters 
+langgraph
+mcp[cli]
+nest_asyncio
+
+python-dotenv
+psycopg2
+
+pydantic
+pydantic-settings 
+pydantic_core
