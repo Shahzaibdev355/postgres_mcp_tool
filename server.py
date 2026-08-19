@@ -1,8 +1,28 @@
-import http
 from typing import Any
 import httpx  # async client
 from mcp.server.fastmcp import FastMCP
 from database.connection import get_postgres_connection
+from psycopg2 import sql
+import json
+
+
+# for column add
+ALLOWED_TYPES = {
+    "TEXT",
+    "VARCHAR",
+    "INT",
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "BOOLEAN",
+    "DATE",
+    "TIMESTAMP",
+    "NUMERIC",
+    "REAL",
+    "DOUBLE PRECISION",
+    "SERIAL",
+}
+
 
 # initilize fastMCP server
 mcp = FastMCP(name="postgres_mcp", host="0.0.0.0", port=8000)
@@ -162,39 +182,269 @@ def execute_select(query: str) -> str:
 
 
 @mcp.tool()
-def insert_row(schema: str, table: str, name: str) -> str:
-    """Insert a name into a table."""
+def insert_row(
+    schema: str,
+    table: str,
+    columns: str,  # JSON array string, e.g. ["name","age"]
+    values: str,  # JSON array string, e.g. ["Ali", 25]
+) -> str:
+    """Insert a row into any PostgreSQL table.
+    columns and values must be JSON array strings, e.g.
+    columns = '["name","age"]', values = '["Ali", 25]'
+    """
 
     try:
+        try:
+            columns_list = json.loads(columns)
+            values_list = json.loads(values)
+        except json.JSONDecodeError as e:
+            return f"Invalid JSON for columns/values: {e}"
+
+        if not isinstance(columns_list, list) or not isinstance(values_list, list):
+            return "columns and values must be JSON arrays."
+
+        if len(columns_list) != len(values_list):
+            return "Number of columns must match number of values."
+
         conn = get_postgres_connection()
         cur = conn.cursor()
 
-        # check schema + table exist
         cur.execute(
             """
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = %s AND table_name = %s
-        """,
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
             (schema, table),
         )
 
         if cur.fetchone() is None:
             cur.close()
             conn.close()
-            return f"Schema or table '{schema}.{table}' does not exist"
+            return f"Table '{schema}.{table}' does not exist."
 
-        query = f"""
-            INSERT INTO {schema}.{table} (name)
-            VALUES (%s)
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            (schema, table),
+        )
+
+        existing_columns = {row[0] for row in cur.fetchall()}
+        invalid_columns = set(columns_list) - existing_columns
+
+        if invalid_columns:
+            cur.close()
+            conn.close()
+            return f"Invalid columns: {', '.join(invalid_columns)}"
+
+        placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in values_list)
+
+        query = sql.SQL(
+            """
+            INSERT INTO {}.{} ({})
+            VALUES ({})
         """
+        ).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.SQL(", ").join(sql.Identifier(c) for c in columns_list),
+            placeholders,
+        )
 
-        cur.execute(query, (name,))
+        cur.execute(query, values_list)
         conn.commit()
 
         cur.close()
         conn.close()
 
-        return f"'{name}' inserted successfully into {schema}.{table}"
+        return f"Row inserted successfully into {schema}.{table}."
 
     except Exception as e:
-        return f"failed to insert row: {e}"
+        return f"Failed to insert row: {e}"
+
+
+@mcp.tool()
+def add_column(schema: str, table: str, column: str, data_type: str) -> str:
+    """Add a new column to an existing PostgreSQL table.
+    data_type must be one of: TEXT, VARCHAR, INT, INTEGER, BIGINT,
+    SMALLINT, BOOLEAN, DATE, TIMESTAMP, NUMERIC, REAL, DOUBLE PRECISION, SERIAL
+    """
+
+    try:
+        data_type_clean = data_type.strip().upper()
+
+        if data_type_clean not in ALLOWED_TYPES:
+            return f"Invalid data type '{data_type}'. Allowed: {', '.join(sorted(ALLOWED_TYPES))}"
+
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+
+        # check table exists
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            (schema, table),
+        )
+
+        if cur.fetchone() is None:
+            cur.close()
+            conn.close()
+            return f"Table '{schema}.{table}' does not exist."
+
+        # check column doesn't already exist
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (schema, table, column),
+        )
+
+        if cur.fetchone() is not None:
+            cur.close()
+            conn.close()
+            return f"Column '{column}' already exists in {schema}.{table}."
+
+        query = sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} " + data_type_clean).format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.Identifier(column),
+        )
+
+        cur.execute(query)
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return f"Column '{column}' ({data_type_clean}) added to {schema}.{table}."
+
+    except Exception as e:
+        return f"Failed to add column: {e}"
+
+
+
+
+@mcp.tool()
+def update_row(
+    schema: str,
+    table: str,
+    columns: str,  # JSON array string, e.g. ["age"]
+    values: str,  # JSON array string, e.g. [25]
+    where_column: str,  # column to match on, e.g. "id"
+    where_value: str,  # value to match, e.g. "1"
+) -> str:
+    """Update a row in any PostgreSQL table, matched by one column.
+    columns and values must be JSON array strings, e.g.
+    columns = '["age"]', values = '[25]'
+    where_column = "id", where_value = "1"
+    """
+
+    try:
+        try:
+            columns_list = json.loads(columns)
+            values_list = json.loads(values)
+        except json.JSONDecodeError as e:
+            return f"Invalid JSON for columns/values: {e}"
+
+        if not isinstance(columns_list, list) or not isinstance(values_list, list):
+            return "columns and values must be JSON arrays."
+
+        if len(columns_list) != len(values_list):
+            return "Number of columns must match number of values."
+
+        if not columns_list:
+            return "At least one column must be provided to update."
+
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+
+        # check table exists
+        cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            (schema, table),
+        )
+
+        if cur.fetchone() is None:
+            cur.close()
+            conn.close()
+            return f"Table '{schema}.{table}' does not exist."
+
+        # check all columns exist (including where_column)
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            (schema, table),
+        )
+
+        existing_columns = {row[0] for row in cur.fetchall()}
+        invalid_columns = set(columns_list) - existing_columns
+
+        if invalid_columns:
+            cur.close()
+            conn.close()
+            return f"Invalid columns: {', '.join(invalid_columns)}"
+
+        if where_column not in existing_columns:
+            cur.close()
+            conn.close()
+            return f"Invalid where_column: '{where_column}' does not exist in {schema}.{table}."
+
+        # check the target row actually exists
+        check_query = sql.SQL("SELECT 1 FROM {}.{} WHERE {} = %s").format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            sql.Identifier(where_column),
+        )
+        cur.execute(check_query, (where_value,))
+
+        if cur.fetchone() is None:
+            cur.close()
+            conn.close()
+            return f"No row found where {where_column} = {where_value}."
+
+        # build SET clause
+        set_clause = sql.SQL(", ").join(
+            sql.SQL("{} = %s").format(sql.Identifier(c)) for c in columns_list
+        )
+
+        query = sql.SQL("UPDATE {}.{} SET {} WHERE {} = %s").format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            set_clause,
+            sql.Identifier(where_column),
+        )
+
+        cur.execute(query, values_list + [where_value])
+        conn.commit()
+
+        rows_affected = cur.rowcount
+
+        cur.close()
+        conn.close()
+
+        return f"{rows_affected} row(s) updated in {schema}.{table} where {where_column} = {where_value}."
+
+    except Exception as e:
+        return f"Failed to update row: {e}"
