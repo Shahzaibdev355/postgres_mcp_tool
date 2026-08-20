@@ -1,9 +1,18 @@
 from typing import Any
 import httpx  # async client
 from mcp.server.fastmcp import FastMCP
-from database.connection import get_postgres_connection
+# from database.connection import get_postgres_connection
 from psycopg2 import sql
+import psycopg2
 import json
+
+
+from database.connection import (
+    get_postgres_connection,
+    set_active_connection,
+    clear_active_connection,
+    get_active_connection_info,
+)
 
 
 # for column add
@@ -44,16 +53,54 @@ async def make_conn_request(url: str) -> dict[str, Any] | None:
             return None
 
 
-@mcp.tool()
-def postgres_connection() -> str:
-    try:
-        conn = get_postgres_connection()
-        conn.close()
+# @mcp.tool()
+# def postgres_connection() -> str:
+#     try:
+#         conn = get_postgres_connection()
+#         conn.close()
 
-        return "PostgreSQL connection successful!"
+#         return "PostgreSQL connection successful!"
+
+#     except Exception as e:
+#         return f"PostgreSQL connection failed: {e}"
+
+
+
+@mcp.tool()
+def connect_database(connection_string: str) -> str:
+    """Connect to a different PostgreSQL database using a full connection string.
+    Format: postgresql://user:password@host:port/dbname
+
+    This overrides the default .env connection for the rest of this session.
+    Use disconnect_database to revert back to the default .env connection.
+    """
+    try:
+        # test the connection before committing to it
+        test_conn = psycopg2.connect(connection_string)
+        test_conn.close()
+
+        set_active_connection(connection_string)
+        return "Successfully connected to the new database. All future operations will use this connection."
 
     except Exception as e:
-        return f"PostgreSQL connection failed: {e}"
+        return f"Failed to connect with the given connection string: {e}"
+
+
+
+
+@mcp.tool()
+def disconnect_database() -> str:
+    """Revert back to the default .env-configured PostgreSQL connection."""
+    clear_active_connection()
+    return "Reverted to default .env connection."
+
+
+@mcp.tool()
+def current_connection_info() -> str:
+    """Show which database connection is currently active."""
+    return get_active_connection_info()
+
+
 
 
 @mcp.tool()
